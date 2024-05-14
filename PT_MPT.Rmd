@@ -1,0 +1,544 @@
+---
+title: "PT and MPT Implementation"
+author: "Anh Phan"
+date: "4/25/2024"
+output: pdf_document
+---
+
+# Library needed
+
+```{r}
+library(parallel)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(mosaic)
+conflicted::conflicts_prefer(base::sum)
+conflicted::conflicts_prefer(base::prod)
+conflicted::conflicts_prefer(base::mean)
+```
+
+# List of helper functions
+
+```{r}
+# Function to search for what quantile in a normal distribution does our datapoint in using bianry search
+find_quantile <- function(x, mu, sigma, n_quantiles) {
+  l <- 1
+  r <- n_quantiles
+  ans <- -1
+  while (l <= r) {
+    m = (l + r) %/% 2
+    if (qnorm(m / (n_quantiles), mean = mu, sd = sigma) >= x) {
+      ans <- m
+      r <- m - 1
+    } else {
+      l <- m + 1
+    }
+  }
+  return(ans)
+}
+
+# Function to draw sample theta
+draw_theta <- function(has_prev, data_count, c, J) {
+  sampled_theta <- list()
+  for (k in 1:J) {
+    # at each level k, we need to sample 2^(k - 1) theta based on uniform distribution
+    if (has_prev) {
+      odd_sampled_theta <- numeric(length = 2^(k - 1))
+      data_count_lv <- data_count[[k]]
+      for (l in 1:(2^(k - 1))) {
+        odd_sampled_theta[l] <- rbeta(1, data_count_lv[2*l - 1] + c*k^2, data_count_lv[2*l] + c*k^2)
+        # prod_theta <- prod_theta * dbeta(odd_sampled_theta[l], data_count_lv[2*l - 1] + c*k^2, data_count_lv[2*l] + c*k^2)
+      }
+    } else {
+      odd_sampled_theta <- rbeta(2^(k-1), c*k^2, c*k^2)
+      # prod_theta <- prod(dbeta(odd_sampled_theta, c*k^2 , c*k^2))
+    }
+    # need a vector to store the sapled theta at level based on the odd sampled theta and 1 - odd sampled theta (theta1, 1-theta1, theta2, 1-theta2, ...)
+    level_sampled_theta <- unlist(lapply(odd_sampled_theta, function(theta) {c(theta, 1-theta)}))
+    sampled_theta[[k]] <- level_sampled_theta
+    # We can also calculate now the pdf of thetas since the theta are INDEPENDENT, and we can multiply it to our current product now
+    }
+  return(sampled_theta)
+}
+```
+
+# Implementation of a random variable drawn from a Polya Tree prior
+
+```{r}
+# We first need the pdf for Polya tree given the normal distribution and the thetas
+pdf_pt_prior <- function(x, mu, sigma, theta_list) {
+  # mu: mean of the normal distribution
+  # sigma: sd of the normal distribution
+  # theta_list: a list of thetas for J level
+  # We first construct the level of Polya tree, J
+  J <- length(theta_list)
+  # Now we need to check the quantile of x (if we divide the normal distribution to 2^J quantile)
+  quantile_x <- find_quantile(x, mu, sigma, 2^J)
+  # After we found the quantile of x, we need to find the theta that associated with it so that we can multiply
+  # We do this by keep dividing quantile_x by 2, until we get J value
+  theta_prod <- 1
+  curr_quantile <- quantile_x # value to keep track of what quantile we added
+  for (i in J:1) {
+    # We get the current quantile 
+    theta_prod <- theta_prod * theta_list[[i]][[curr_quantile]]
+    curr_quantile <- (curr_quantile %/% 2) + (curr_quantile %% 2)
+  }
+  return(dnorm(x, mean = mu, sd = sigma) * 2^J * theta_prod)
+}
+
+# Now we make cdf based on the pdf, we will do this based on simple calculation of riemann sum with many terms
+cdf_pt_prior <- function(x, mu, sigma, theta_list) {
+  # mu: mean of the normal distribution
+  # sigma: sd of the normal distribution
+  # theta_list: a list of thetas for J level
+  # in order to approximate using riemann sum, we can consider the range of [-5sd, x] (use -5sd instead of -Inf)
+  x_vec <- seq(mu - 5*sigma, x, length.out = 100001) # so that we have 100000 range in the middle
+  x_mid_vec <- (x_vec[2:100001] + x_vec[1:100000]) / 2
+  y_mid_vec <- unlist(mclapply(x_mid_vec, function(lambda) {return(pdf_pt_prior(lambda, mu, sigma, theta_list))}, mc.cores = 4))
+  dx <- x_vec[2] - x_vec[1]
+  return(sum(dx * y_mid_vec))
+}
+
+# test the function
+mu_test <- 0
+sigma_test <- 1
+theta_list_test1 <- list(c(0.4, 0.6))
+theta_list_test2 <- list(c(0.4, 0.6), c(0.3, 0.7, 0.6, 0.4))
+cdf_pt_prior(0, mu_test, sigma_test, theta_list_test1) # should be close to 0.4
+cdf_pt_prior(qnorm(1/4), mu_test, sigma_test, theta_list_test2) # should be close to 0.12
+cdf_pt_prior(qnorm(7/8), mu_test, sigma_test, theta_list_test2) # should be close to 0.4 + 0.6 * 0.6 + prob between q(3/4) and q(7/8) * 0.24 / 0.25
+``` 
+
+# Implementation of pdf and cdf of a mixture distribution over theta with Polya tree prior
+(since theta will be drawn randomly based on c, so we will take a mixture over theta)
+
+```{r}
+# We first need to implement an pdf for this case of polya tree (with more random variable)
+# X | c, mu, sigma = integral of X | theta, c, mu, sigma * theta | c dtheta
+# Since there can be many value of theta, we can consider sampling the theta
+pdf_pt_prior_mixture_c <- function(x, mu, sigma, c, J, n_iter = 100000, has_prev = FALSE, data_count = list()) {
+  set.seed(1234)
+  # mu, sigma: mean and sd of the normal distribution
+  # c: constant in the distribution for theta
+  # J: number of level
+  # data_count: count of data at each quantile at each level of tree 
+  # has_orev: whether our distribution has had past data
+  # Firstly, noticing that all of our theta are in the range [0, 1], so the volume space of all theta is finite, so we can use a Monte Carlo integration method
+  # Now we will sample theta based on INDEPENDENT distribution of the thetas
+  # and for each set, we will calculate the pdf (using the function that we madee
+  ans <- 0
+  for (i in 1:n_iter) {
+    # sample our thetas and save it in a list
+    sampled_theta <- draw_theta(has_prev, data_count, c, J)
+    # Now we calculate integral of X | theta, c, mu, sigma * p(theta) = E(X | theta, c, mu, sigma) => 
+    # we calculate the mean by each turn calculate the pdf
+    # and then we add the result to ans
+    ans <- ans + pdf_pt_prior(x, mu, sigma, sampled_theta)
+  }
+  return(ans / n_iter)
+}
+
+# We can also make a cdf function based on this
+cdf_pt_prior_mixture_c <- function(x, mu, sigma, c, J, n_iter = 100000, has_prev = FALSE, data_count = list()) {
+  set.seed(1234)
+  x_vec <- seq(mu - 5*sigma, x, length.out = 10001) # so that we have 100000 range in the middle
+  x_mid_vec <- (x_vec[2:10001] + x_vec[1:10000]) / 2
+  y_mid_vec <- unlist(mclapply(x_mid_vec, function(lambda) {return(pdf_pt_prior_mixture_c(lambda, mu, sigma, c, J, n_iter, has_prev, data_count))}, mc.cores = 4))
+  dx <- x_vec[2] - x_vec[1]
+  return(sum(dx * y_mid_vec))
+}
+```
+
+# We need to make a function for finding the count given fixed mu and theta for posterior
+
+```{r}
+# Given the value of c (for distribution of theta) to begin with, we can update posterior by just finding the list of data count for each quantile, and then use the above function for pdf
+pt_update <- function(x_vec, mu_0, sigma_0, J) {
+  # x_vec: vector of new data
+  # mu_0: initial value for mean
+  # sigma_0: initial value for sd
+  # J: tree level
+  # FIrst we need a tree level
+  # first of all, for easier update of theta, we need to count how many values in each quantiles, for different number of tree level
+  quantiles_data_count <- list()
+  # We do this backwardly from 2^J quantiles to 2 quantiles, since we can use the larger list to create smaller lsit
+  for (i in J:1) {
+    if (i == J) {
+      # Now we get the position of each data point in 1 of 2^J quantiles
+      quantile_x_vec <- unlist(lapply(x_vec, function(x) {(return(find_quantile(x, mu_0, sigma_0, 2^J)))}))
+      # Make a list to store the count
+      data_count <- rep(0, 2^J)
+      for (k in 1:length(x_vec)) {
+        # for each x, find the quantile, and add 1 to the counter associated with that quantile
+        data_count[quantile_x_vec[[k]]] <- data_count[quantile_x_vec[[k]]] + 1
+      }
+      # Now we save it as the Jth item of the data count for each level of tree
+      quantiles_data_count[[J]] <-  data_count
+    } else {
+      # Now we use the list at level i + 1 to construct the list at level i
+      data_count <- rep(0, 2^i)
+      # Now we construct the count
+      for (k in 1:(2^i)) {
+        data_count[[k]] <- quantiles_data_count[[i + 1]][[2*k - 1]] + quantiles_data_count[[i + 1]][[2*k]] 
+      }
+      # Now we save the data count
+      quantiles_data_count[[i]] <- data_count
+    }
+  }
+  # After findind the number of data in each quantiles for each level, we will now update the data to use for pdf
+  return(quantiles_data_count)
+}
+
+# Test the function
+pt_update(c(1/4, 1/2, -1/4, -1/4), 0, 1, 2)
+```
+
+# Implementation of random variable drawn from a Mixture of Polya Tree 
+(assuming list of theta has already been drawn)
+
+```{r}
+pdf_mpt_prior <- function(x, 
+                          mu_0, d_mu, r_mu, # initial mu and distribution of mu
+                          sigma_0, d_sigma, r_sigma, # initial theta and distribution of theta
+                          theta_list, # list of theta that will be drawn 
+                          n_iter = 10000, # number of mu, theta to be drawn
+                          has_prev = FALSE, prev_data = c(),
+                          t_mu, t_sigma) {
+  # First we need to save the answer
+  ans <- 0
+  # and we need to preprare the initial value for mu, sigma
+  prev_mu <- mu_0
+  prev_sigma <- sigma_0
+  n <- length(prev_data)
+  # For each turn, we draw the mu and sigma based on Metropolis-Hastings (for posterior), or based on their prior 
+  for (i in 1:n_iter) {
+    if (has_prev) {
+      # Draw based on Metropolis-Hasting since this is a posterior distribution
+      # We first draw mu
+      candidate_mu <- rnorm(1, prev_mu, prev_sigma * sqrt(t_mu / n))
+      # calculate a to find acceptance criteria 
+      a <- prod(dnorm(prev_data, candidate_mu, prev_sigma)) * d_mu(candidate_mu) / (prod(dnorm(prev_data, prev_mu, prev_sigma)) * d_mu(prev_mu))
+      if (a > 1) {
+        # prev_mu <- candidate_mu
+      } else {
+        prob_drawn <- runif(1)[[1]]
+        if (prob_drawn > a) {
+         candidate_mu <- prev_mu 
+        }
+      }
+      # We then draw sigma
+      candidate_sigma <- sqrt(rlnorm(1, log(prev_sigma^2), sqrt(t_sigma)))
+      # calculate a for parameter update
+      a <- prod(dnorm(prev_data, prev_mu, candidate_sigma)) * d_sigma(candidate_sigma) / (prod(dnorm(prev_data, prev_mu, prev_sigma)) * d_sigma(prev_sigma))
+      if (a > 1) {
+        # prev_sigma <- candidate_sigma
+      } else {
+        prob_drawn <- runif(1)[[1]]
+        if (prob_drawn > a) {
+         candidate_sigma <- prev_sigma
+        }
+      }
+    } else {
+      candidate_mu <- r_mu()
+      candidate_sigma <- r_sigma()
+    }
+    ans <- ans + pdf_pt_prior(x, candidate_mu, candidate_sigma, theta_list)
+  }
+  return(ans/n_iter)
+}
+```
+
+
+# Implementation of pdf and cdf of a mixture distribution over theta drawn from a Mixture of Polya Tree 
+(We draw list of theta first, and for each list of theta, we calculate the pdf of mpt at that theta list)
+
+```{r}
+pdf_mpt_prior_mixture_c <- function(x, 
+                          mu_0, d_mu, r_mu, # initial mu and distribution of mu
+                          sigma_0, d_sigma, r_sigma, # initial theta and distribution of theta
+                          c, J, # parameters to draw the theta list 
+                          n_iter = 10000, # number of mu, theta to be drawn
+                          has_prev = FALSE, prev_data = c(), # whether we have previous data
+                          t_mu = 1, t_sigma = 1) {
+  # First we need to save the answer
+  ans <- 0
+  # and we need to preprare the initial value for mu, sigma
+  prev_mu <- mu_0
+  prev_sigma <- sigma_0
+  # now we iterate
+  for (i in 1:n_iter) {
+    # First get the data count based on current mu and sigma
+    data_count <- pt_update(prev_data, prev_mu, prev_sigma, J)
+    # Then we draw the theta list for current use
+    theta_list <- draw_theta(has_prev, prev_data, prev_mu, prev_sigma)
+    # then we calculate the pdf of mpt at that theta
+    ans <- ans + pdf_mpt_prior(x, 
+                               prev_mu, d_mu, r_mu, # initial mu and distribution of mu
+                               prev_sigma, d_sigma, r_sigma, # initial theta and distribution of theta
+                               theta_list, # list of theta that will be drawn 
+                               1000, # number of mu, theta to be drawn
+                               has_prev, prev_data, # whether we have previous data
+                               t_mu, t_sigma)
+    # Now we will draw next prev_mu and prev_sigma for initialization of a new theta
+    if (has_prev) {
+      # Draw based on Metropolis-Hasting since this is a posterior distribution
+      # We first draw mu
+      candidate_mu <- rnorm(1, prev_mu, prev_sigma * sqrt(t_mu / n))
+      # calculate a for parameter update
+      a <- prod(dnorm(prev_data, candidate_mu, prev_sigma)) * d_mu(candidate_mu) / prod(dnorm(prev_data, prev_mu, prev_sigma)) * d_mu(prev_mu)
+      if (a > 1) {
+        prev_mu <- candidate_mu
+      } else {
+        prob_drawn <- runif(1)[[1]]
+        if (prob_drawn < a) {
+         prev_mu <- candidate_mu 
+        }
+      }
+      # We then draw sigma
+      candidate_sigma <- sqrt(rlnorm(1, log(prev_sigma^2), sqrt(t_sigma)))
+      # calculate a for parameter update
+      a <- prod(dnorm(prev_data, prev_mu, candidate_sigma)) * d_sigma(candidate_sigma) / prod(dnorm(prev_data, prev_mu, prev_sigma)) * d_sigma(prev_sigma)
+      if (a > 1) {
+        prev_sigma <- candidate_sigma
+      } else {
+        prob_drawn <- runif(1)[[1]]
+        if (prob_drawn < a) {
+         prev_sigma <- candidate_sigma
+        }
+      }
+    } else {
+      prev_mu <- r_mu()
+      prev_sigma <- r_sigma()
+    }
+  }
+  return(ans / n_iter)
+}
+```
+
+
+# Now, we can use this in an one sample analysis
+
+We will use the mtcars data for this example, specifically the miles/gallon value of car
+
+```{r}
+data <- (mtcars$mpg)
+# randomly chosen
+# mu_0 <- 15
+# sigma_0 <- 5
+# how can it improved a informed parans
+mu_0 <- mean(data)
+sigma_0 <- sd(data)
+```
+
+We first consider the normal model for this data, assuming the mean and standard deviation equal the usual mean and standard deviation:
+
+```{r}
+normal <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0)) %>%
+  mutate(y = dnorm(x, mean = mu_0, sd = sigma_0))
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+p + geom_line(data = normal, aes(x = x, y = y *50, color = "Normal")) +
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density")) +
+  scale_color_manual(name = "Legend", 
+                      values = c("Normal" = "red"))
+```
+
+Now we can test it on different Polya Tree prior
+
+## Test on 1 level Polya tree prior with c = 1 with data update
+
+We first try to draw random theta and then draw pdf on that
+
+```{r}
+pt_1_post <- pt_update(data, mu_0, sigma_0, J = 1)
+pt_1 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
+# Now we draw 10 different distribution from PT prior
+for (i in 1:10) {
+  # get the column name to add into the data
+  curr_col_name <- paste("y_", as.character(i), sep = "") 
+  # now draw the random theta
+  curr_theta_list <- draw_theta(TRUE, pt_1_post, 1, 1)
+  # Now we fill the column
+  curr_col <- unlist(lapply(pt_1$x, function(x) {return(pdf_pt_prior(x, mu_0, sigma_0, curr_theta_list))}))
+  pt_1[,curr_col_name] <- curr_col
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+for (i in 1:10) {
+  # get the column name
+  p <- p + geom_line(data = pt_1, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
+}
+p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+```
+
+Now we can consider the mixture case:
+
+```{r}
+pt_1 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0), 
+                   y = numeric(1000))
+for (i in 1:1000) {
+  if (i %% 10 == 0) {
+    # print(i)
+  }
+  pt_1[i, 2] <- pdf_pt_prior_mixture_c(pt_1[i, 1], mu_0, sigma_0, 1, 1, 10000, TRUE, pt_1_post)
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+p + geom_line(data = normal, aes(x = x, y = y *50, color = "Normal")) +
+  geom_line(data = pt_1, aes(x = x, y = y *50, color = "PT 1 level"))  + 
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density")) +
+  scale_color_manual(name = "Legend", 
+                      values = c("Normal" = "red", 
+                                 "PT 1 level" = "blue")) + 
+  geom_vline(xintercept = mosaic::fav_stats(data)$Q1, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = mosaic::fav_stats(data)$median, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = mosaic::fav_stats(data)$Q3, linetype = "dashed", color = "black")
+  
+```
+
+
+## Now we will try a 2 level Polya tree prior instead of 1 level
+
+```{r}
+pt_2_post <- pt_update(data, mu_0, sigma_0, J = 2)
+pt_2 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
+# Now we draw 10 different distribution from PT prior
+for (i in 1:10) {
+  # get the column name to add into the data
+  curr_col_name <- paste("y_", as.character(i), sep = "") 
+  # now draw the random theta
+  curr_theta_list <- draw_theta(TRUE, pt_2_post, 1, 2)
+  # Now we fill the column
+  curr_col <- unlist(lapply(pt_2$x, function(x) {return(pdf_pt_prior(x, mu_0, sigma_0, curr_theta_list))}))
+  pt_2[,curr_col_name] <- curr_col
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+for (i in 1:10) {
+  # get the column name
+  p <- p + geom_line(data = pt_2, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
+}
+p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+```
+
+Now we can consider the mixture case:
+
+```{r}
+pt_2 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0), 
+                   y = numeric(1000))
+for (i in 1:1000) {
+  if (i %% 10 == 0) {
+    # print(i)
+  }
+  pt_2[i, 2] <- pdf_pt_prior_mixture_c(pt_2[i, 1], mu_0, sigma_0, 1, 2, 10000, TRUE, pt_2_post)
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+p + geom_line(data = normal, aes(x = x, y = y *50, color = "Normal")) +
+  geom_line(data = pt_2, aes(x = x, y = y *50, color = "PT 2 level"))  + 
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density")) +
+  scale_color_manual(name = "Legend", 
+                      values = c("Normal" = "red", 
+                                 "PT 2 level" = "blue")) + 
+  geom_vline(xintercept = mosaic::fav_stats(data)$Q1, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = mosaic::fav_stats(data)$median, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = mosaic::fav_stats(data)$Q3, linetype = "dashed", color = "black")
+```
+
+
+It seems polya tree would fit the data better based on the fact that it is an extension of its original distribution. Now, we can try to impose a distribution on mu and sigma, and then we take the mean to get the mixture of polya tree.
+
+## Try with a Mixture of Polya Tree prior with 1 level
+
+We will assume here that:
+
+$$\mu \sim N(\mu_0, (\frac{\sigma_0}{10})^2)$$
+and 
+$$\sigma \sim N(\sigma_0, (\frac{\sigma_0}{10})^2)$$
+
+```{r}
+# We started with 1 level first
+mpt_1 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
+# Our prior for mu and sigma
+d_mu_test <- function(x) {
+  return(dnorm(x, mu_0, sigma_0 / 10))
+}
+r_mu_test <- function() {
+  return(rnorm(1, mu_0, sigma_0 / 10))
+}
+d_sigma_test <- function(x) {
+  return(dnorm(x, sigma_0, sigma_0 / 10))
+}
+r_sigma_test <- function() {
+  return(rnorm(1, sigma_0, sigma_0 / 10))
+}
+# Draw 10 random theta
+for (i in 1:10) {
+  print(i)
+  # get the column name to add into the data
+  curr_col_name <- paste("y_", as.character(i), sep = "") 
+  # now draw the random theta
+  curr_theta_list <- draw_theta(TRUE, pt_1_post, 1, 1)
+  # Now we fill the column
+  curr_col <- unlist(mclapply(mpt_1$x, 
+                              function(x) {return(pdf_mpt_prior(x, 
+                                                                mu_0, d_mu_test, r_mu_test, 
+                                                                sigma_0, d_sigma_test, r_sigma_test,
+                                                                curr_theta_list,
+                                                                10000,
+                                                                TRUE, data,
+                                                                1, 1))},
+                              mc.cores = 4))
+  mpt_1[,curr_col_name] <- curr_col
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+for (i in 1:10) {
+  # get the column name
+  p <- p + geom_line(data = mpt_1, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
+}
+p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+```
+
+Seems like it is pretty smooth, how about a 2 level this time:
+
+## Try with a Mixture of Polya Tree prior with 2 level
+
+```{r}
+mpt_2 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
+# Draw 10 random theta
+for (i in 1:10) {
+  print(i)
+  # get the column name to add into the data
+  curr_col_name <- paste("y_", as.character(i), sep = "") 
+  # now draw the random theta
+  curr_theta_list <- draw_theta(TRUE, pt_2_post, 1, 2)
+  # Now we fill the column
+  curr_col <- unlist(mclapply(mpt_2$x, 
+                              function(x) {return(pdf_mpt_prior(x, 
+                                                                mu_0, d_mu_test, r_mu_test, 
+                                                                sigma_0, d_sigma_test, r_sigma_test,
+                                                                curr_theta_list,
+                                                                10000,
+                                                                TRUE, data,
+                                                                1, 1))},
+                              mc.cores = 4))
+  mpt_2[,curr_col_name] <- curr_col
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+for (i in 1:10) {
+  # get the column name
+  p <- p + geom_line(data = mpt_2, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
+}
+p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+```
+
