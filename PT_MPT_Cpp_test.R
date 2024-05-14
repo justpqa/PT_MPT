@@ -3,6 +3,7 @@ library(parallel)
 library(dplyr)
 library(tidyr)
 sourceCpp('~/Stats 322 S24/Submit/PT_MPT.cpp')
+# THIS CODE IS THE VERSION OF THE RMD FILE BUT USING THE IMPLEMENTATION IN RCPP INSTEAD
 mu_test <- 0
 sigma_test <- 1
 theta_list_test1 <- matrix(c(0.4, 0.6, 0, 0), nrow = 1)
