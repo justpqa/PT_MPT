@@ -14,7 +14,7 @@ library(dplyr)
 library(ggplot2)
 library(mosaic)
 library(Rcpp)
-sourceCpp("~/PT_MPT/PT_MPT.cpp")
+sourceCpp("~/Stats 322 S24/Submit/PT_MPT/PT_MPT.cpp")
 conflicted::conflicts_prefer(base::sum)
 conflicted::conflicts_prefer(base::prod)
 conflicted::conflicts_prefer(base::mean)
@@ -68,14 +68,14 @@ for (i in 1:10) {
   curr_col <- unlist(lapply(pt_1$x, function(x) {return(pdf_pt_prior_cpp(x, mu_0, sigma_0, curr_theta_list))}))
   pt_1[,curr_col_name] <- curr_col
 }
+pt_1 <- pt_1 %>%
+  pivot_longer(cols = starts_with("y"), names_to = "y", values_to = "Density")
 p <- ggplot() +
   geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
   ylab("Count")
-for (i in 1:10) {
-  # get the column name
-  p <- p + geom_line(data = pt_1, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
-}
-p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+p + 
+  geom_line(data = pt_1, aes_string(x = "x", y = paste("Density", "*50",sep = ""), color = "y"), linetype = "dashed") +
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
 ```
 
 Now we can consider the mixture case:
@@ -120,14 +120,14 @@ for (i in 1:10) {
   curr_col <- unlist(lapply(pt_2$x, function(x) {return(pdf_pt_prior_cpp(x, mu_0, sigma_0, curr_theta_list))}))
   pt_2[,curr_col_name] <- curr_col
 }
+pt_2 <- pt_2 %>%
+  pivot_longer(cols = starts_with("y"), names_to = "y", values_to = "Density")
 p <- ggplot() +
   geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
   ylab("Count")
-for (i in 1:10) {
-  # get the column name
-  p <- p + geom_line(data = pt_2, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
-}
-p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+p + 
+  geom_line(data = pt_2, aes_string(x = "x", y = paste("Density", "*50",sep = ""), color = "y"), linetype = "dashed") +
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
 ```
 
 Now we can consider the mixture case:
@@ -201,14 +201,14 @@ for (i in 1:10) {
                               mc.cores = 4))
   mpt_1[,curr_col_name] <- curr_col
 }
+mpt_1 <- mpt_1 %>%
+  pivot_longer(cols = starts_with("y"), names_to = "y", values_to = "Density")
 p <- ggplot() +
   geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
   ylab("Count")
-for (i in 1:10) {
-  # get the column name
-  p <- p + geom_line(data = mpt_1, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
-}
-p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+p + 
+  geom_line(data = mpt_1, aes_string(x = "x", y = paste("Density", "*50",sep = ""), color = "y"), linetype = "dashed") +
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
 ```
 
 Seems like it is pretty smooth, how about a 2 level this time:
@@ -223,7 +223,7 @@ for (i in 1:10) {
   # get the column name to add into the data
   curr_col_name <- paste("y_", as.character(i), sep = "") 
   # now draw the random theta
-  curr_theta_list <- draw_theta(TRUE, pt_2_post, 1, 2)
+  curr_theta_list <- draw_theta_cpp(TRUE, pt_2_post, 1, 2)
   # Now we fill the column
   curr_col <- unlist(mclapply(mpt_2$x, 
                               function(x) {return(pdf_mpt_prior_cpp(x, 
@@ -236,13 +236,12 @@ for (i in 1:10) {
                               mc.cores = 4))
   mpt_2[,curr_col_name] <- curr_col
 }
+mpt_2 <- mpt_2 %>%
+  pivot_longer(cols = starts_with("y"), names_to = "y", values_to = "Density")
 p <- ggplot() +
   geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
   ylab("Count")
-for (i in 1:10) {
-  # get the column name
-  p <- p + geom_line(data = mpt_2, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
-}
-p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+p + 
+  geom_line(data = mpt_2, aes_string(x = "x", y = paste("Density", "*50",sep = ""), color = "y"), linetype = "dashed") +
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
 ```
-
