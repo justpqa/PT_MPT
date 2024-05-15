@@ -1,0 +1,248 @@
+---
+title: "PT and MPT Implementation in Cpp test"
+author: "Anh Phan"
+date: "4/25/2024"
+output: pdf_document
+---
+
+# Library needed
+
+```{r}
+library(parallel)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(mosaic)
+library(Rcpp)
+sourceCpp("~/PT_MPT/PT_MPT.cpp")
+conflicted::conflicts_prefer(base::sum)
+conflicted::conflicts_prefer(base::prod)
+conflicted::conflicts_prefer(base::mean)
+```
+
+
+# Now, we can use this in an one sample analysis
+
+We will use the mtcars data for this example, specifically the miles/gallon value of car
+
+```{r}
+data <- (mtcars$mpg)
+# randomly chosen
+# mu_0 <- 15
+# sigma_0 <- 5
+# how can it improved a informed parans
+mu_0 <- mean(data)
+sigma_0 <- sd(data)
+```
+
+We first consider the normal model for this data, assuming the mean and standard deviation equal the usual mean and standard deviation:
+
+```{r}
+normal <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0)) %>%
+  mutate(y = dnorm(x, mean = mu_0, sd = sigma_0))
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+p + geom_line(data = normal, aes(x = x, y = y *50, color = "Normal")) +
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density")) +
+  scale_color_manual(name = "Legend", 
+                      values = c("Normal" = "red"))
+```
+
+Now we can test it on different Polya Tree prior
+
+## Test on 1 level Polya tree prior with c = 1 with data update
+
+We first try to draw random theta and then draw pdf on that
+
+```{r}
+pt_1_post <- pt_update(data, mu_0, sigma_0, J = 1)
+pt_1 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
+# Now we draw 10 different distribution from PT prior
+for (i in 1:10) {
+  # get the column name to add into the data
+  curr_col_name <- paste("y_", as.character(i), sep = "") 
+  # now draw the random theta
+  curr_theta_list <- draw_theta(TRUE, pt_1_post, 1, 1)
+  # Now we fill the column
+  curr_col <- unlist(lapply(pt_1$x, function(x) {return(pdf_pt_prior(x, mu_0, sigma_0, curr_theta_list))}))
+  pt_1[,curr_col_name] <- curr_col
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+for (i in 1:10) {
+  # get the column name
+  p <- p + geom_line(data = pt_1, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
+}
+p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+```
+
+Now we can consider the mixture case:
+
+```{r}
+pt_1 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0), 
+                   y = numeric(1000))
+for (i in 1:1000) {
+  if (i %% 10 == 0) {
+    # print(i)
+  }
+  pt_1[i, 2] <- pdf_pt_prior_mixture_c(pt_1[i, 1], mu_0, sigma_0, 1, 1, 10000, TRUE, pt_1_post)
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+p + geom_line(data = normal, aes(x = x, y = y *50, color = "Normal")) +
+  geom_line(data = pt_1, aes(x = x, y = y *50, color = "PT 1 level"))  + 
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density")) +
+  scale_color_manual(name = "Legend", 
+                      values = c("Normal" = "red", 
+                                 "PT 1 level" = "blue")) + 
+  geom_vline(xintercept = mosaic::fav_stats(data)$Q1, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = mosaic::fav_stats(data)$median, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = mosaic::fav_stats(data)$Q3, linetype = "dashed", color = "black")
+  
+```
+
+
+## Now we will try a 2 level Polya tree prior instead of 1 level
+
+```{r}
+pt_2_post <- pt_update(data, mu_0, sigma_0, J = 2)
+pt_2 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
+# Now we draw 10 different distribution from PT prior
+for (i in 1:10) {
+  # get the column name to add into the data
+  curr_col_name <- paste("y_", as.character(i), sep = "") 
+  # now draw the random theta
+  curr_theta_list <- draw_theta(TRUE, pt_2_post, 1, 2)
+  # Now we fill the column
+  curr_col <- unlist(lapply(pt_2$x, function(x) {return(pdf_pt_prior(x, mu_0, sigma_0, curr_theta_list))}))
+  pt_2[,curr_col_name] <- curr_col
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+for (i in 1:10) {
+  # get the column name
+  p <- p + geom_line(data = pt_2, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
+}
+p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+```
+
+Now we can consider the mixture case:
+
+```{r}
+pt_2 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0), 
+                   y = numeric(1000))
+for (i in 1:1000) {
+  if (i %% 10 == 0) {
+    # print(i)
+  }
+  pt_2[i, 2] <- pdf_pt_prior_mixture_c(pt_2[i, 1], mu_0, sigma_0, 1, 2, 10000, TRUE, pt_2_post)
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+p + geom_line(data = normal, aes(x = x, y = y *50, color = "Normal")) +
+  geom_line(data = pt_2, aes(x = x, y = y *50, color = "PT 2 level"))  + 
+  scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density")) +
+  scale_color_manual(name = "Legend", 
+                      values = c("Normal" = "red", 
+                                 "PT 2 level" = "blue")) + 
+  geom_vline(xintercept = mosaic::fav_stats(data)$Q1, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = mosaic::fav_stats(data)$median, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = mosaic::fav_stats(data)$Q3, linetype = "dashed", color = "black")
+```
+
+
+It seems polya tree would fit the data better based on the fact that it is an extension of its original distribution. Now, we can try to impose a distribution on mu and sigma, and then we take the mean to get the mixture of polya tree.
+
+## Try with a Mixture of Polya Tree prior with 1 level
+
+We will assume here that:
+
+$$\mu \sim N(\mu_0, (\frac{\sigma_0}{10})^2)$$
+and 
+$$\sigma \sim N(\sigma_0, (\frac{\sigma_0}{10})^2)$$
+
+```{r}
+# We started with 1 level first
+mpt_1 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
+# Our prior for mu and sigma
+d_mu_test <- function(x) {
+  return(dnorm(x, mu_0, sigma_0 / 10))
+}
+r_mu_test <- function() {
+  return(rnorm(1, mu_0, sigma_0 / 10))
+}
+d_sigma_test <- function(x) {
+  return(dnorm(x, sigma_0, sigma_0 / 10))
+}
+r_sigma_test <- function() {
+  return(rnorm(1, sigma_0, sigma_0 / 10))
+}
+# Draw 10 random theta
+for (i in 1:10) {
+  print(i)
+  # get the column name to add into the data
+  curr_col_name <- paste("y_", as.character(i), sep = "") 
+  # now draw the random theta
+  curr_theta_list <- draw_theta(TRUE, pt_1_post, 1, 1)
+  # Now we fill the column
+  curr_col <- unlist(mclapply(mpt_1$x, 
+                              function(x) {return(pdf_mpt_prior(x, 
+                                                                mu_0, d_mu_test, r_mu_test, 
+                                                                sigma_0, d_sigma_test, r_sigma_test,
+                                                                curr_theta_list,
+                                                                10000,
+                                                                TRUE, data,
+                                                                1, 1))},
+                              mc.cores = 4))
+  mpt_1[,curr_col_name] <- curr_col
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+for (i in 1:10) {
+  # get the column name
+  p <- p + geom_line(data = mpt_1, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
+}
+p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+```
+
+Seems like it is pretty smooth, how about a 2 level this time:
+
+## Try with a Mixture of Polya Tree prior with 2 level
+
+```{r}
+mpt_2 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
+# Draw 10 random theta
+for (i in 1:10) {
+  print(i)
+  # get the column name to add into the data
+  curr_col_name <- paste("y_", as.character(i), sep = "") 
+  # now draw the random theta
+  curr_theta_list <- draw_theta(TRUE, pt_2_post, 1, 2)
+  # Now we fill the column
+  curr_col <- unlist(mclapply(mpt_2$x, 
+                              function(x) {return(pdf_mpt_prior(x, 
+                                                                mu_0, d_mu_test, r_mu_test, 
+                                                                sigma_0, d_sigma_test, r_sigma_test,
+                                                                curr_theta_list,
+                                                                10000,
+                                                                TRUE, data,
+                                                                1, 2))},
+                              mc.cores = 4))
+  mpt_2[,curr_col_name] <- curr_col
+}
+p <- ggplot() +
+  geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
+  ylab("Count")
+for (i in 1:10) {
+  # get the column name
+  p <- p + geom_line(data = mpt_2, aes_string(x = "x", y = paste("y_", as.character(i), "*50",sep = "")), linetype = "dashed")
+}
+p + scale_y_continuous(sec.axis = sec_axis(~ ./50, name = "Density"))
+```
+
