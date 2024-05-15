@@ -56,16 +56,16 @@ Now we can test it on different Polya Tree prior
 We first try to draw random theta and then draw pdf on that
 
 ```{r}
-pt_1_post <- pt_update(data, mu_0, sigma_0, J = 1)
+pt_1_post <- pt_update_cpp(data, mu_0, sigma_0, J = 1)
 pt_1 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
 # Now we draw 10 different distribution from PT prior
 for (i in 1:10) {
   # get the column name to add into the data
   curr_col_name <- paste("y_", as.character(i), sep = "") 
   # now draw the random theta
-  curr_theta_list <- draw_theta(TRUE, pt_1_post, 1, 1)
+  curr_theta_list <- draw_theta_cpp(TRUE, pt_1_post, 1, 1)
   # Now we fill the column
-  curr_col <- unlist(lapply(pt_1$x, function(x) {return(pdf_pt_prior(x, mu_0, sigma_0, curr_theta_list))}))
+  curr_col <- unlist(lapply(pt_1$x, function(x) {return(pdf_pt_prior_cpp(x, mu_0, sigma_0, curr_theta_list))}))
   pt_1[,curr_col_name] <- curr_col
 }
 p <- ggplot() +
@@ -87,7 +87,7 @@ for (i in 1:1000) {
   if (i %% 10 == 0) {
     # print(i)
   }
-  pt_1[i, 2] <- pdf_pt_prior_mixture_c(pt_1[i, 1], mu_0, sigma_0, 1, 1, 10000, TRUE, pt_1_post)
+  pt_1[i, 2] <- pdf_pt_prior_mixture_c_cpp(pt_1[i, 1], mu_0, sigma_0, 1, 1, 10000, TRUE, pt_1_post)
 }
 p <- ggplot() +
   geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
@@ -108,16 +108,16 @@ p + geom_line(data = normal, aes(x = x, y = y *50, color = "Normal")) +
 ## Now we will try a 2 level Polya tree prior instead of 1 level
 
 ```{r}
-pt_2_post <- pt_update(data, mu_0, sigma_0, J = 2)
+pt_2_post <- pt_update_cpp(data, mu_0, sigma_0, J = 2)
 pt_2 <- data.frame(x = rnorm(1000, mean = mu_0, sd = sigma_0))
 # Now we draw 10 different distribution from PT prior
 for (i in 1:10) {
   # get the column name to add into the data
   curr_col_name <- paste("y_", as.character(i), sep = "") 
   # now draw the random theta
-  curr_theta_list <- draw_theta(TRUE, pt_2_post, 1, 2)
+  curr_theta_list <- draw_theta_cpp(TRUE, pt_2_post, 1, 2)
   # Now we fill the column
-  curr_col <- unlist(lapply(pt_2$x, function(x) {return(pdf_pt_prior(x, mu_0, sigma_0, curr_theta_list))}))
+  curr_col <- unlist(lapply(pt_2$x, function(x) {return(pdf_pt_prior_cpp(x, mu_0, sigma_0, curr_theta_list))}))
   pt_2[,curr_col_name] <- curr_col
 }
 p <- ggplot() +
@@ -139,7 +139,7 @@ for (i in 1:1000) {
   if (i %% 10 == 0) {
     # print(i)
   }
-  pt_2[i, 2] <- pdf_pt_prior_mixture_c(pt_2[i, 1], mu_0, sigma_0, 1, 2, 10000, TRUE, pt_2_post)
+  pt_2[i, 2] <- pdf_pt_prior_mixture_c_cpp(pt_2[i, 1], mu_0, sigma_0, 1, 2, 10000, TRUE, pt_2_post)
 }
 p <- ggplot() +
   geom_histogram(data = data.frame(data), aes(x = data), bins = 30) +
@@ -188,10 +188,10 @@ for (i in 1:10) {
   # get the column name to add into the data
   curr_col_name <- paste("y_", as.character(i), sep = "") 
   # now draw the random theta
-  curr_theta_list <- draw_theta(TRUE, pt_1_post, 1, 1)
+  curr_theta_list <- draw_theta_cpp(TRUE, pt_1_post, 1, 1)
   # Now we fill the column
   curr_col <- unlist(mclapply(mpt_1$x, 
-                              function(x) {return(pdf_mpt_prior(x, 
+                              function(x) {return(pdf_mpt_prior_cpp(x, 
                                                                 mu_0, d_mu_test, r_mu_test, 
                                                                 sigma_0, d_sigma_test, r_sigma_test,
                                                                 curr_theta_list,
@@ -226,7 +226,7 @@ for (i in 1:10) {
   curr_theta_list <- draw_theta(TRUE, pt_2_post, 1, 2)
   # Now we fill the column
   curr_col <- unlist(mclapply(mpt_2$x, 
-                              function(x) {return(pdf_mpt_prior(x, 
+                              function(x) {return(pdf_mpt_prior_cpp(x, 
                                                                 mu_0, d_mu_test, r_mu_test, 
                                                                 sigma_0, d_sigma_test, r_sigma_test,
                                                                 curr_theta_list,
