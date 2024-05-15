@@ -105,7 +105,9 @@ mu_test <- 0
 sigma_test <- 1
 theta_list_test1 <- list(c(0.4, 0.6))
 theta_list_test2 <- list(c(0.4, 0.6), c(0.3, 0.7, 0.6, 0.4))
-cdf_pt_prior(0, mu_test, sigma_test, theta_list_test1) # should be close to 0.4
+prev_time <- Sys.time()
+pdf_pt_prior(0, mu_test, sigma_test, theta_list_test1) # should be close to 0.4
+Sys.time() - prev_time
 cdf_pt_prior(qnorm(1/4), mu_test, sigma_test, theta_list_test2) # should be close to 0.12
 cdf_pt_prior(qnorm(7/8), mu_test, sigma_test, theta_list_test2) # should be close to 0.4 + 0.6 * 0.6 + prob between q(3/4) and q(7/8) * 0.24 / 0.25
 ``` 
