@@ -64,6 +64,61 @@ NumericMatrix draw_theta_cpp(bool has_prev, IntegerMatrix data_count, int c, int
   return sampled_theta;
 }
 
+// We can rewrite the function to draw a mu for the case of prior on mu 
+// Based on Metropolis Hasting
+// [[Rcpp::export]]
+double draw_mu_cpp(bool has_prev, NumericVector prev_data, 
+                   double prev_mu, double prev_sigma,
+                   Function d_mu, Function r_mu, double t_mu) {
+  int n = static_cast<int>(prev_data.length());
+  double candidate_mu;
+  double a;
+  double prob_drawn;
+  if (has_prev) {
+    // Draw based on Metropolis-Hasting since this is a posterior distribution
+    // We first draw mu
+    candidate_mu = R::rnorm(prev_mu, prev_sigma * sqrt(t_mu / n));
+    // calculate a to find acceptance criteria 
+    a = prod_vec(dnorm(prev_data, candidate_mu, prev_sigma)) * as<double>(d_mu(candidate_mu)) / (prod_vec(dnorm(prev_data, prev_mu, prev_sigma)) * as<double>(d_mu(prev_mu)));
+    if (a <= 1) {
+      prob_drawn = R::runif(0, 1);
+      if (prob_drawn > a) {
+        candidate_mu = prev_mu; 
+      }
+    }
+  } else {
+    candidate_mu = as<double>(r_mu());
+  }
+  return candidate_mu;
+}
+
+// We also need to draw sigma
+// [[Rcpp::export]]
+double draw_sigma_cpp(bool has_prev, NumericVector prev_data,
+                      double prev_mu, double prev_sigma,
+                      Function d_sigma, Function r_sigma, double t_sigma) {
+  int n = static_cast<int>(prev_data.length());
+  double candidate_sigma;
+  double a;
+  double prob_drawn;
+  if (has_prev) {
+    // Draw based on Metropolis-Hasting since this is a posterior distribution
+    // We then draw sigma
+    candidate_sigma = sqrt(R::rlnorm(log(std::pow(prev_sigma, 2)), sqrt(t_sigma)));
+    // calculate a for parameter update
+    a = prod_vec(dnorm(prev_data, prev_mu, candidate_sigma)) * as<double>(d_sigma(candidate_sigma)) / (prod_vec(dnorm(prev_data, prev_mu, prev_sigma)) * as<double>(d_sigma(prev_sigma)));
+    if (a <= 1)  {
+      prob_drawn = R::runif(0, 1);
+      if (prob_drawn > a) {
+        candidate_sigma = prev_sigma;
+      }
+    }
+  } else {
+    candidate_sigma = as<double>(r_sigma());
+  }
+  return candidate_sigma;
+}
+
 // IMPLEMENTATION OF A RANDOM VARIABLE DRAWN FROM A POLYA TREE PRIOR
 // We first need the pdf for Polya tree given the normal distribution and the thetas
 // [[Rcpp::export]]
@@ -219,32 +274,8 @@ double pdf_mpt_prior_cpp(double x,
   int n = static_cast<int>(prev_data.length());
   // For each turn, we draw the mu and sigma based on Metropolis-Hastings (for posterior), or based on their prior 
   for (int i = 0; i < n_iter; i++) {
-    if (has_prev) {
-      // Draw based on Metropolis-Hasting since this is a posterior distribution
-      // We first draw mu
-      candidate_mu = R::rnorm(prev_mu, prev_sigma * sqrt(t_mu / n));
-      // calculate a to find acceptance criteria 
-      a = prod_vec(dnorm(prev_data, candidate_mu, prev_sigma)) * as<double>(d_mu(candidate_mu)) / (prod_vec(dnorm(prev_data, prev_mu, prev_sigma)) * as<double>(d_mu(prev_mu)));
-      if (a <= 1) {
-        prob_drawn = R::runif(0, 1);
-        if (prob_drawn > a) {
-          candidate_mu = prev_mu; 
-        }
-      }
-      // We then draw sigma
-      candidate_sigma = sqrt(R::rlnorm(log(std::pow(prev_sigma, 2)), sqrt(t_sigma)));
-      // calculate a for parameter update
-      a = prod_vec(dnorm(prev_data, prev_mu, candidate_sigma)) * as<double>(d_sigma(candidate_sigma)) / (prod_vec(dnorm(prev_data, prev_mu, prev_sigma)) * as<double>(d_sigma(prev_sigma)));
-      if (a <= 1)  {
-        prob_drawn = R::runif(0, 1);
-        if (prob_drawn > a) {
-          candidate_sigma = prev_sigma;
-        }
-      }
-    } else {
-      candidate_mu = as<double>(r_mu());
-      candidate_sigma = as<double>(r_sigma());
-    }
+    candidate_mu = draw_mu_cpp(has_prev, prev_data, prev_mu, prev_sigma, d_mu, r_mu, t_mu);
+    candidate_sigma = draw_sigma_cpp(has_prev, prev_data, prev_mu, prev_sigma, d_sigma, r_sigma, t_sigma);
     ans = ans + pdf_pt_prior_cpp(x, candidate_mu, candidate_sigma, theta_list);
   }
   return ans/n_iter;
